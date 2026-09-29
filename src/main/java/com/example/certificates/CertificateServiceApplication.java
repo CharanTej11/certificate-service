@@ -4,6 +4,10 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.boot.SpringApplication;
 import org.springframework.boot.autoconfigure.SpringBootApplication;
+import org.springframework.context.ApplicationContextInitializer;
+import org.springframework.context.ConfigurableApplicationContext;
+import org.springframework.core.env.ConfigurableEnvironment;
+import org.springframework.core.env.MapPropertySource;
 import org.springframework.data.jpa.repository.config.EnableJpaAuditing;
 
 import java.io.Closeable;
@@ -12,6 +16,8 @@ import java.net.URI;
 import java.sql.Connection;
 import java.sql.ResultSet;
 import java.sql.Statement;
+import java.util.HashMap;
+import java.util.Map;
 
 @SpringBootApplication
 @EnableJpaAuditing
@@ -21,36 +27,93 @@ public class CertificateServiceApplication {
     private static Object embeddedPostgres;
 
     public static void main(String[] args) {
-        configureCloudDatabaseUrl();
+        SpringApplication app = new SpringApplication(CertificateServiceApplication.class);
+        app.addInitializers(new ApplicationContextInitializer<ConfigurableApplicationContext>() {
+            @Override
+            public void initialize(ConfigurableApplicationContext applicationContext) {
+                normalizeDataSourceProperties(applicationContext.getEnvironment());
+            }
+        });
+
         ensureLocalPostgresIfAvailable();
-        SpringApplication.run(CertificateServiceApplication.class, args);
+        app.run(args);
     }
 
-    private static void configureCloudDatabaseUrl() {
-        String dbUrl = System.getenv("DATABASE_URL");
-        if (dbUrl != null && !dbUrl.isBlank() && System.getenv("SPRING_DATASOURCE_URL") == null) {
-            try {
-                String normalizedUrl = dbUrl.startsWith("postgres://") 
-                        ? dbUrl.replace("postgres://", "postgresql://") 
-                        : dbUrl;
-                URI uri = new URI(normalizedUrl);
-                String userInfo = uri.getUserInfo();
-                String host = uri.getHost();
-                int port = uri.getPort() == -1 ? 5432 : uri.getPort();
-                String path = uri.getPath();
+    private static void normalizeDataSourceProperties(ConfigurableEnvironment env) {
+        String rawUrl = env.getProperty("SPRING_DATASOURCE_URL");
+        if (rawUrl == null || rawUrl.isBlank()) {
+            rawUrl = env.getProperty("DATABASE_URL");
+        }
+        if (rawUrl == null || rawUrl.isBlank()) {
+            rawUrl = env.getProperty("spring.datasource.url");
+        }
 
-                String jdbcUrl = "jdbc:postgresql://" + host + ":" + port + path;
-                System.setProperty("spring.datasource.url", jdbcUrl);
+        if (rawUrl == null || rawUrl.isBlank()) {
+            return;
+        }
 
-                if (userInfo != null && userInfo.contains(":")) {
-                    String[] parts = userInfo.split(":", 2);
-                    System.setProperty("spring.datasource.username", parts[0]);
-                    System.setProperty("spring.datasource.password", parts[1]);
-                }
-                log.info("Configured Spring DataSource from cloud DATABASE_URL for host: {}", host);
-            } catch (Exception e) {
-                log.warn("Could not parse DATABASE_URL: {}", e.getMessage());
+        String trimmed = rawUrl.trim();
+        Map<String, Object> map = new HashMap<>();
+
+        // If it starts with jdbc:, just fix jdbc:postgres:// to jdbc:postgresql:// if needed
+        if (trimmed.startsWith("jdbc:")) {
+            if (trimmed.startsWith("jdbc:postgres://")) {
+                String fixed = "jdbc:postgresql://" + trimmed.substring("jdbc:postgres://".length());
+                map.put("spring.datasource.url", fixed);
+                map.put("SPRING_DATASOURCE_URL", fixed);
+                env.getPropertySources().addFirst(new MapPropertySource("cloudDataSourceNormalizer", map));
+                log.info("Normalized JDBC DataSource URL: {}", fixed);
             }
+            return;
+        }
+
+        // Handle postgres:// or postgresql:// without jdbc:
+        try {
+            String uriString = trimmed.startsWith("postgres://")
+                    ? trimmed.replaceFirst("^postgres://", "postgresql://")
+                    : trimmed;
+            URI uri = new URI(uriString);
+
+            String userInfo = uri.getUserInfo();
+            String username = null;
+            String password = null;
+            if (userInfo != null && userInfo.contains(":")) {
+                String[] parts = userInfo.split(":", 2);
+                username = parts[0];
+                password = parts[1];
+            }
+
+            String host = uri.getHost();
+            int port = uri.getPort() == -1 ? 5432 : uri.getPort();
+            String path = uri.getPath() != null ? uri.getPath() : "/certificates";
+            String query = uri.getQuery();
+
+            String jdbcUrl = "jdbc:postgresql://" + host + ":" + port + path + (query != null ? "?" + query : "");
+
+            map.put("spring.datasource.url", jdbcUrl);
+            map.put("SPRING_DATASOURCE_URL", jdbcUrl);
+            System.setProperty("spring.datasource.url", jdbcUrl);
+            System.setProperty("SPRING_DATASOURCE_URL", jdbcUrl);
+
+            if (username != null) {
+                map.put("spring.datasource.username", username);
+                map.put("SPRING_DATASOURCE_USERNAME", username);
+                System.setProperty("spring.datasource.username", username);
+            }
+            if (password != null) {
+                map.put("spring.datasource.password", password);
+                map.put("SPRING_DATASOURCE_PASSWORD", password);
+                System.setProperty("spring.datasource.password", password);
+            }
+
+            env.getPropertySources().addFirst(new MapPropertySource("cloudDataSourceNormalizer", map));
+            log.info("Auto-normalized cloud DataSource URL to: {}", jdbcUrl);
+        } catch (Exception e) {
+            String fallback = "jdbc:" + (trimmed.startsWith("postgres://") ? trimmed.replaceFirst("^postgres://", "postgresql://") : trimmed);
+            map.put("spring.datasource.url", fallback);
+            map.put("SPRING_DATASOURCE_URL", fallback);
+            env.getPropertySources().addFirst(new MapPropertySource("cloudDataSourceNormalizer", map));
+            log.warn("Fallback normalized cloud DataSource URL to: {}", fallback);
         }
     }
 
