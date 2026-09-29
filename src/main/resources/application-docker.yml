@@ -1,0 +1,7 @@
+# Docker profile: values are supplied via environment variables in docker-compose.yml
+spring:
+  jpa:
+    show-sql: false
+logging:
+  level:
+    com.example.certificates: INFO

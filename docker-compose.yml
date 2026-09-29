@@ -1,0 +1,36 @@
+services:
+  db:
+    image: postgres:16-alpine
+    container_name: certificates-db
+    environment:
+      POSTGRES_DB: certificates
+      POSTGRES_USER: certificates
+      POSTGRES_PASSWORD: certificates
+    ports:
+      - "5432:5432"
+    volumes:
+      - db-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U certificates -d certificates"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: certificates-app
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      SPRING_PROFILES_ACTIVE: docker
+      SPRING_DATASOURCE_URL: jdbc:postgresql://db:5432/certificates
+      SPRING_DATASOURCE_USERNAME: certificates
+      SPRING_DATASOURCE_PASSWORD: certificates
+    ports:
+      - "8080:8080"
+
+volumes:
+  db-data:
