@@ -1,13 +1,12 @@
 package com.example.certificates;
 
-import io.zonky.test.db.postgres.embedded.EmbeddedPostgres;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.boot.SpringApplication;
 import org.springframework.boot.autoconfigure.SpringBootApplication;
 import org.springframework.data.jpa.repository.config.EnableJpaAuditing;
 
-import java.io.IOException;
+import java.io.Closeable;
 import java.net.Socket;
 import java.net.URI;
 import java.sql.Connection;
@@ -19,11 +18,11 @@ import java.sql.Statement;
 public class CertificateServiceApplication {
 
     private static final Logger log = LoggerFactory.getLogger(CertificateServiceApplication.class);
-    private static EmbeddedPostgres embeddedPostgres;
+    private static Object embeddedPostgres;
 
     public static void main(String[] args) {
         configureCloudDatabaseUrl();
-        ensurePostgresRunning();
+        ensureLocalPostgresIfAvailable();
         SpringApplication.run(CertificateServiceApplication.class, args);
     }
 
@@ -31,8 +30,10 @@ public class CertificateServiceApplication {
         String dbUrl = System.getenv("DATABASE_URL");
         if (dbUrl != null && !dbUrl.isBlank() && System.getenv("SPRING_DATASOURCE_URL") == null) {
             try {
-                // If DATABASE_URL is postgres://user:pass@host:port/db or postgresql://...
-                URI uri = new URI(dbUrl.startsWith("postgres://") ? dbUrl.replace("postgres://", "postgresql://") : dbUrl);
+                String normalizedUrl = dbUrl.startsWith("postgres://") 
+                        ? dbUrl.replace("postgres://", "postgresql://") 
+                        : dbUrl;
+                URI uri = new URI(normalizedUrl);
                 String userInfo = uri.getUserInfo();
                 String host = uri.getHost();
                 int port = uri.getPort() == -1 ? 5432 : uri.getPort();
@@ -46,37 +47,35 @@ public class CertificateServiceApplication {
                     System.setProperty("spring.datasource.username", parts[0]);
                     System.setProperty("spring.datasource.password", parts[1]);
                 }
-                log.info("Auto-configured Spring DataSource from cloud DATABASE_URL for host: {}", host);
+                log.info("Configured Spring DataSource from cloud DATABASE_URL for host: {}", host);
             } catch (Exception e) {
                 log.warn("Could not parse DATABASE_URL: {}", e.getMessage());
             }
         }
     }
 
-    private static void ensurePostgresRunning() {
+    private static void ensureLocalPostgresIfAvailable() {
         String dsUrl = System.getProperty("spring.datasource.url", System.getenv("SPRING_DATASOURCE_URL"));
         if (dsUrl != null && !dsUrl.contains("localhost") && !dsUrl.contains("127.0.0.1")) {
-            log.info("External/Cloud DataSource detected; skipping local embedded PostgreSQL.");
             return;
         }
 
         if (System.getenv("DATABASE_URL") != null && !System.getenv("DATABASE_URL").contains("localhost")) {
-            log.info("Cloud DATABASE_URL detected; skipping local embedded PostgreSQL.");
             return;
         }
 
         if (isPortListening("localhost", 5432)) {
-            log.info("PostgreSQL is already running on port 5432.");
             return;
         }
 
-        log.info("No PostgreSQL detected on port 5432. Starting embedded PostgreSQL 16...");
         try {
-            embeddedPostgres = EmbeddedPostgres.builder()
-                    .setPort(5432)
-                    .start();
+            Class<?> builderClass = Class.forName("io.zonky.test.db.postgres.embedded.EmbeddedPostgres");
+            Object builder = builderClass.getMethod("builder").invoke(null);
+            builder = builder.getClass().getMethod("setPort", int.class).invoke(builder, 5432);
+            embeddedPostgres = builder.getClass().getMethod("start").invoke(builder);
 
-            try (Connection conn = embeddedPostgres.getPostgresDatabase().getConnection();
+            javax.sql.DataSource ds = (javax.sql.DataSource) embeddedPostgres.getClass().getMethod("getPostgresDatabase").invoke(embeddedPostgres);
+            try (Connection conn = ds.getConnection();
                  Statement stmt = conn.createStatement()) {
                 stmt.execute("DO $$ BEGIN " +
                         "IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'certificates') THEN " +
@@ -91,19 +90,17 @@ public class CertificateServiceApplication {
             }
 
             Runtime.getRuntime().addShutdownHook(new Thread(() -> {
-                if (embeddedPostgres != null) {
+                if (embeddedPostgres instanceof Closeable closeable) {
                     try {
-                        log.info("Stopping embedded PostgreSQL...");
-                        embeddedPostgres.close();
-                    } catch (IOException e) {
-                        log.error("Error closing embedded PostgreSQL", e);
-                    }
+                        closeable.close();
+                    } catch (Exception ignored) {}
                 }
             }));
-
-            log.info("Embedded PostgreSQL started successfully on port 5432.");
+            log.info("Embedded PostgreSQL started on port 5432.");
+        } catch (ClassNotFoundException e) {
+            log.debug("Embedded Postgres not present on classpath; skipping.");
         } catch (Exception e) {
-            log.error("Failed to start embedded PostgreSQL: {}", e.getMessage(), e);
+            log.warn("Failed to initialize embedded Postgres: {}", e.getMessage());
         }
     }
 
