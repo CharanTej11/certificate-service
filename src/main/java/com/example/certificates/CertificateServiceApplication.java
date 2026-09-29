@@ -9,6 +9,7 @@ import org.springframework.data.jpa.repository.config.EnableJpaAuditing;
 
 import java.io.IOException;
 import java.net.Socket;
+import java.net.URI;
 import java.sql.Connection;
 import java.sql.ResultSet;
 import java.sql.Statement;
@@ -21,14 +22,46 @@ public class CertificateServiceApplication {
     private static EmbeddedPostgres embeddedPostgres;
 
     public static void main(String[] args) {
+        configureCloudDatabaseUrl();
         ensurePostgresRunning();
         SpringApplication.run(CertificateServiceApplication.class, args);
     }
 
+    private static void configureCloudDatabaseUrl() {
+        String dbUrl = System.getenv("DATABASE_URL");
+        if (dbUrl != null && !dbUrl.isBlank() && System.getenv("SPRING_DATASOURCE_URL") == null) {
+            try {
+                // If DATABASE_URL is postgres://user:pass@host:port/db or postgresql://...
+                URI uri = new URI(dbUrl.startsWith("postgres://") ? dbUrl.replace("postgres://", "postgresql://") : dbUrl);
+                String userInfo = uri.getUserInfo();
+                String host = uri.getHost();
+                int port = uri.getPort() == -1 ? 5432 : uri.getPort();
+                String path = uri.getPath();
+
+                String jdbcUrl = "jdbc:postgresql://" + host + ":" + port + path;
+                System.setProperty("spring.datasource.url", jdbcUrl);
+
+                if (userInfo != null && userInfo.contains(":")) {
+                    String[] parts = userInfo.split(":", 2);
+                    System.setProperty("spring.datasource.username", parts[0]);
+                    System.setProperty("spring.datasource.password", parts[1]);
+                }
+                log.info("Auto-configured Spring DataSource from cloud DATABASE_URL for host: {}", host);
+            } catch (Exception e) {
+                log.warn("Could not parse DATABASE_URL: {}", e.getMessage());
+            }
+        }
+    }
+
     private static void ensurePostgresRunning() {
-        String dsUrl = System.getenv("SPRING_DATASOURCE_URL");
+        String dsUrl = System.getProperty("spring.datasource.url", System.getenv("SPRING_DATASOURCE_URL"));
         if (dsUrl != null && !dsUrl.contains("localhost") && !dsUrl.contains("127.0.0.1")) {
             log.info("External/Cloud DataSource detected; skipping local embedded PostgreSQL.");
+            return;
+        }
+
+        if (System.getenv("DATABASE_URL") != null && !System.getenv("DATABASE_URL").contains("localhost")) {
+            log.info("Cloud DATABASE_URL detected; skipping local embedded PostgreSQL.");
             return;
         }
 
