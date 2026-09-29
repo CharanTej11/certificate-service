@@ -55,7 +55,6 @@ public class CertificateServiceApplication {
         String trimmed = rawUrl.trim();
         Map<String, Object> map = new HashMap<>();
 
-        // If it starts with jdbc:, just fix jdbc:postgres:// to jdbc:postgresql:// if needed
         if (trimmed.startsWith("jdbc:")) {
             if (trimmed.startsWith("jdbc:postgres://")) {
                 String fixed = "jdbc:postgresql://" + trimmed.substring("jdbc:postgres://".length());
@@ -67,7 +66,6 @@ public class CertificateServiceApplication {
             return;
         }
 
-        // Handle postgres:// or postgresql:// without jdbc:
         try {
             String uriString = trimmed.startsWith("postgres://")
                     ? trimmed.replaceFirst("^postgres://", "postgresql://")
@@ -85,7 +83,7 @@ public class CertificateServiceApplication {
 
             String host = uri.getHost();
             int port = uri.getPort() == -1 ? 5432 : uri.getPort();
-            String path = uri.getPath() != null ? uri.getPath() : "/certificates";
+            String path = uri.getPath() != null && !uri.getPath().isBlank() ? uri.getPath() : "/certificates";
             String query = uri.getQuery();
 
             String jdbcUrl = "jdbc:postgresql://" + host + ":" + port + path + (query != null ? "?" + query : "");
